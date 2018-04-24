@@ -1,0 +1,26 @@
+Cryptid supports encrypted sync functionality between a local filesystem and Backblaze's B2 service.
+
+Features:
+
+- A random keyfile is encrypted with a passphrase to allow passphrases to be changed
+without re-encrypting data.
+- Because B2 does not support renames or alterations of metadata for uploaded files, we
+use dedicated, overwritable metadata files to support renames.  This also allows for
+bulk offloaded backups.  One use case is to support users with low upload bandwidth
+staging subsets of files to their laptop, where they can use, eg, a library's high
+bandwidth connection for the upload.
+
+Limitations:
+- File lengths are observable.  Preventing this would require block-based uploads.
+- Fixed parallelism for uploads.  Because we upload small files first, bandwidth
+saturation initially requires many more threads than when we get to large files
+later on.
+- No compression prior to encryption (makes efficient length calculation difficult)
+- I am not a cryptographer, use at your own risk.
+
+TODO:
+- Clean up config.properties defaulting
+
+MAYBEs:
+- Block based storage option
+- Compress prior to upload
