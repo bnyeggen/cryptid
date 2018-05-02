@@ -14,6 +14,8 @@ public class Config {
 	private final String defaultSyncPath;
 	private final String defaultBucket;
 	private final String defaultPassphrase;
+	private final int defaultParallelism;
+	private final boolean defaultSkipRenames;
 	
 	public static void load() {
 		load(DEFAULT_CONFIG_LOC);
@@ -35,6 +37,8 @@ public class Config {
 	public String getDefaultSyncPath() { return defaultSyncPath; }
 	public String getDefaultBucket() { return defaultBucket; }
 	public String getDefaultPassphrase() { return defaultPassphrase; }
+	public int getDefaultParallelism() { return defaultParallelism; }
+	public boolean getDefaultSkipRenames() { return defaultSkipRenames; }
 
 	private Config(String targ){
 		final Properties properties = new Properties();
@@ -47,6 +51,9 @@ public class Config {
 			defaultSyncPath = properties.getProperty("DEFAULT_SYNC_PATH", null);
 			defaultBucket = properties.getProperty("DEFAULT_BUCKET", null);
 			defaultPassphrase = properties.getProperty("DEFAULT_PASSPHRASE", null);
+			String parallelism = properties.getProperty("DEFAULT_PARALLELISM", "1");
+			defaultParallelism = Integer.parseInt(parallelism);
+			defaultSkipRenames = Boolean.valueOf(properties.getProperty("DEFAULT_SKIP_RENAMES", null));
 		} catch(IOException ex) {
 			throw new RuntimeException(ex);
 		}

@@ -64,6 +64,8 @@ public class Sync implements AutoCloseable {
 	private int uploadParallelism = 2;
 	//This thread pool is passed to B2 for their internal parallelism when uploading large files
 	private final ExecutorService pool = Executors.newFixedThreadPool(4);
+	//Don't upload pure renames, only new content
+	private boolean skipRenames = true;
 
 	public Sync(Path localBaseDir, String bucketName, char[] passphrase, String accountID, String applicationID) throws B2Exception {
 		this.client = B2StorageHttpClientBuilder.builder(
@@ -105,6 +107,10 @@ public class Sync implements AutoCloseable {
 			crypt = new KeyfileCrypter(encryptedKeyfile, passphrase);
 			System.out.println("Keyfile decrypted");
 		}
+	}
+	
+	public void setSkipRenames(boolean v) { 
+		this.skipRenames = v;
 	}
 	
 	public void setUploadParallelism(int n) {
@@ -228,7 +234,8 @@ public class Sync implements AutoCloseable {
 		return true;
 	}
 	
-	private void deleteLeftovers(Collection<B2Deletable> md) throws B2Exception {
+	private void deleteLeftovers() throws B2Exception {
+		final Collection<B2Deletable> md = toDelete.values();
 		int cnt = md.size();
 		System.out.println(cnt + " remote files to delete");
 		for(final B2Deletable i : md) {
@@ -293,6 +300,7 @@ public class Sync implements AutoCloseable {
 		//Correlate remote intrinsic & namefile to gen complete remote records
 		int i = 0;
 		for(final NamefileMetadata namefile : nfmd) {
+			//If we have multiple namefiles, they're all treated as valid
 			final IntrinsicMetadata intrinsic = imd.get(namefile.getAssociatedIntrinsicFile());
 			if(intrinsic != null) {
 				final RemoteRecord rr = new RemoteRecord(intrinsic, namefile);
@@ -311,7 +319,18 @@ public class Sync implements AutoCloseable {
 				Files.walkFileTree(baseDir, getLocalScanner());
 				//Signal we are done
 				uploads.add(UploadPair.QUEUE_POISON);
-				System.out.println(totalCounter.get() + " total local files found");			
+				System.out.println(totalCounter.get() + " total local files found");	
+				//File scanner handles local / remote correlation, so we can actually delete here
+				if(deleteOrphans) {
+					System.out.println("Deleting leftover files on remote");
+					//Delete leftovers
+					try {
+						deleteLeftovers();
+						System.out.println("Delete finished");
+					} catch(B2Exception ex) {
+						throw new RuntimeException("Delete failed", ex);
+					}
+				}
 			}
 			catch(IOException ex) { throw new RuntimeException(ex); }
 		});
@@ -335,6 +354,10 @@ public class Sync implements AutoCloseable {
 					final B2UploadFileRequest namefile = upload.getNamefileUpload(crypt, bucketId);
 					final B2UploadFileRequest body = upload.getBodyUpload(crypt, bucketId);
 					System.out.println("Uploading for local file: " + upload.getLocalName());
+					if(namefile != null && body == null && skipRenames) {
+						System.out.println("Skipping rename, " + uploads.size() + " remaining, " + totalCounter.get() + " files scanned");
+						continue;						
+					}
 					if(namefile != null) {
 						System.out.println("Uploading namefile: " + namefile.getFileName());
 						client.uploadSmallFile(namefile);
@@ -357,12 +380,6 @@ public class Sync implements AutoCloseable {
 		for(final Thread t : uploaders) {
 			try {t.join();}
 			catch(InterruptedException ex) { throw new RuntimeException(ex); }
-		}
-
-		if(deleteOrphans) {
-			System.out.println("Deleting leftover files on remote");
-			//Delete leftovers
-			deleteLeftovers(toDelete.values());
 		}
 	}
 }

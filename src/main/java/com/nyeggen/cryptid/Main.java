@@ -12,8 +12,9 @@ public class Main {
 		String accountID = null;
 		String applicationID = null;
 		boolean deleteOrphans = false;
-		int nThreads = 2;
+		int nThreads = -1;
 		char[] newPassphrase = null;
+		boolean skipRenames = false;
 
 		//Manually incrementing
 		for(int i=0; i<args.length; ) {
@@ -80,7 +81,13 @@ public class Main {
 				i+=2;
 				continue;
 			}
+			if(args[i].equals("-skipRenames")) {
+				skipRenames = true;
+				i++;
+				continue;
+			}
 		}
+		System.out.println("Loading config");
 		if(configLoc == null) Config.load();
 		else Config.load(configLoc);
 		
@@ -89,7 +96,10 @@ public class Main {
 		if(bucket == null) bucket = Config.getInstance().getDefaultBucket();
 		if(applicationID == null) applicationID = Config.getInstance().getApplicationKey();
 		if(accountID == null) accountID = Config.getInstance().getAccountID();
+		if(nThreads == -1) nThreads = Config.getInstance().getDefaultParallelism();
+		//TODO: Load skipRenames from config if not in CLI args		
 		
+		System.out.println("Initiating sync");
 		try (final Sync sync = new Sync(
 				Paths.get(localPath), 
 				bucket, 
@@ -97,6 +107,7 @@ public class Main {
 				accountID,
 				applicationID);) {
 			sync.setUploadParallelism(nThreads);
+			sync.setSkipRenames(skipRenames);
 			if(newPassphrase != null) {
 				sync.uploadKeyfileWithPassphrase(newPassphrase);
 			}
