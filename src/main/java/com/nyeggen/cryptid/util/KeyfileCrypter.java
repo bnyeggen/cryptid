@@ -14,9 +14,11 @@ import java.security.SecureRandom;
 import java.security.spec.AlgorithmParameterSpec;
 import java.security.spec.KeySpec;
 
+import javax.crypto.BadPaddingException;
 import javax.crypto.Cipher;
 import javax.crypto.CipherInputStream;
 import javax.crypto.CipherOutputStream;
+import javax.crypto.IllegalBlockSizeException;
 import javax.crypto.SecretKey;
 import javax.crypto.SecretKeyFactory;
 import javax.crypto.spec.GCMParameterSpec;
@@ -217,9 +219,18 @@ public class KeyfileCrypter {
 	public void decrypt(InputStream is, OutputStream os) throws IOException {
 		final byte[] ivs = new byte[IVS_LENGTH];
 		is.read(ivs);
+
 		final Cipher cipher = decryptionCipherForSecret(ivs);
-		try (final CipherInputStream cis = new CipherInputStream(is, cipher)){
-			cis.transferTo(os);
+		final byte[] buf = new byte[8192];
+		int nRead;
+		while((nRead = is.read(buf)) >= 0) {
+			os.write(cipher.update(buf, 0, nRead));
 		}
+		try {
+			os.write(cipher.doFinal());
+		} catch(BadPaddingException | IllegalBlockSizeException ex) {
+			throw new RuntimeException(ex);
+		}
+		os.flush();
 	}
 }
