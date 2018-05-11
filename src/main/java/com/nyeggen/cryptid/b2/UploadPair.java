@@ -40,6 +40,9 @@ public class UploadPair implements Comparable<UploadPair> {
 	public B2UploadFileRequest getNamefileUpload(KeyfileCrypter crypt, String bucketId) throws IOException {
 		return rec.uploadForName(crypt, bucketId);
 	}
+	public void deleteTempCryptFile() throws IOException {
+		rec.deleteTempCryptFile();
+	}
 	
 	@Override
 	public int compareTo(UploadPair o) {
@@ -47,6 +50,7 @@ public class UploadPair implements Comparable<UploadPair> {
 		//POISON object is always at end of queue
 		if(this == QUEUE_POISON) return 1;
 		if(o == QUEUE_POISON) return -1;
+		//TODO: non negative = small first
 		return Long.compare(uploadSize, o.uploadSize);
 	}
 

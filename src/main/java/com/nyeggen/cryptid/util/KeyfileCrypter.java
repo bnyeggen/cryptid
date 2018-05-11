@@ -5,7 +5,6 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.io.SequenceInputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
@@ -16,8 +15,6 @@ import java.security.spec.KeySpec;
 
 import javax.crypto.BadPaddingException;
 import javax.crypto.Cipher;
-import javax.crypto.CipherInputStream;
-import javax.crypto.CipherOutputStream;
 import javax.crypto.IllegalBlockSizeException;
 import javax.crypto.SecretKey;
 import javax.crypto.SecretKeyFactory;
@@ -26,25 +23,30 @@ import javax.crypto.spec.PBEKeySpec;
 import javax.crypto.spec.SecretKeySpec;
 
 public class KeyfileCrypter {
-	private static final int IVS_LENGTH = 16; //May also be 12?
+	//If you encrypt 1000 bytes, output will be length IVS_LENGTH + 1000 + STREAM_PAD_LENGTH
+	private static final int STREAM_PAD_LENGTH = 16;
+	//The SunJCE providers only support processing 2GB of data before they throw,
+	//regardless of the underlying cipher semantics.  Therefore we need to reset them
+	//with new IVs and new ciphers every N bytes.  N must be somewhat small, due to the
+	//need to fit the buffer in memory to call doFinal() on the entire buffer instead of
+	//update() on segments; the former is far faster.
+	private static final int RESET_ENC_CIPHER_EVERY = 500 * 1000 * 1000; //500M bytes
+	private static final int RESET_DEC_CIPHER_EVERY = RESET_ENC_CIPHER_EVERY + STREAM_PAD_LENGTH;
+	private static final int IVS_LENGTH = 16;
 	private static final int KEY_ROUNDS = 65536; //This is major performance bottleneck for small files
 	private static final int AES_BITS = 256;
-	//We might need to retain this for performance reasons?
 	private static final int SALT_LENGTH = 16;
-	
 	private static final int GCM_TAG_LENGTH = 16; //num bytes
 	
-	private static final String CRYPT_MODE_GCM = "AES/GCM/NoPadding";
+	private static final String CRYPT_MODE = "AES/GCM/NoPadding";
 	private static final String KEY_SPEC = "PBKDF2WithHmacSHA256";
 	
 	//This passphrase is used to encrypt the underlying key, to support changing passphrases
 	private final char[] password;
 	//This is the raw underlying key, encrypted on the backend via the passphrase
 	private final byte[] key;
-
-	private final String CRYPT_MODE = CRYPT_MODE_GCM;
+		
 	private final SecureRandom rng;
-
 	private final SecretKeySpec secretKeySpec;
 	
 	private SecretKey secretKeyFromPassword(final byte[] salt, final char[] pw) {
@@ -60,9 +62,7 @@ public class KeyfileCrypter {
 	}
 	
 	private AlgorithmParameterSpec getAlgoParamSpec(byte[] ivs) {
-		if(CRYPT_MODE.equals(CRYPT_MODE_GCM)) {
-			return new GCMParameterSpec(GCM_TAG_LENGTH * 8, ivs);
-		} else throw new IllegalStateException();
+		return new GCMParameterSpec(GCM_TAG_LENGTH * 8, ivs);
 	}
 	
 	private Cipher encryptionCipherForSecret(byte[] ivs) {
@@ -138,11 +138,8 @@ public class KeyfileCrypter {
 			bais.read(ivs);
 			
 			final Cipher decryptor = decryptionCipherForKeyfile(salt, ivs);
-			try(final CipherInputStream cis = new CipherInputStream(bais, decryptor);){
-				this.key = cis.readAllBytes();
-				//Should be 32 bytes, ie 256 bits
-			}
-		} catch(IOException ex) {
+			this.key = decryptor.doFinal(bais.readAllBytes());
+		} catch(IOException | BadPaddingException | IllegalBlockSizeException ex) {
 			throw new RuntimeException(ex);
 		}
 		
@@ -158,11 +155,10 @@ public class KeyfileCrypter {
 			baos.write(ivs);
 			
 			final Cipher encrypter = encryptionCipherForKeyfile(salt, ivs, newPassphrase);
-			try (final CipherOutputStream cos = new CipherOutputStream(baos, encrypter);){
-				cos.write(key);
-			}
-			
+			baos.write(encrypter.doFinal(key));
 			return baos.toByteArray();
+		} catch(BadPaddingException | IllegalBlockSizeException ex) {
+			throw new IOException(ex);
 		}
 	}
 	
@@ -172,33 +168,67 @@ public class KeyfileCrypter {
 		return out;
 	}
 	
-	public static final int STREAM_PAD_SIZE = 32;
-	
-	public InputStream createInputStream(Path in) throws IOException {
-		final byte[] ivs = getRandomBytes(IVS_LENGTH);
-		final ByteArrayInputStream ivsStream = new ByteArrayInputStream(ivs);
-
-		final Cipher encryptor = encryptionCipherForSecret(ivs);
+	public Path encryptFileToTemp(Path in) throws IOException{
+		long inputSize = Files.size(in);
+		final byte[] buf = new byte[Math.min(RESET_ENC_CIPHER_EVERY, (int)Math.min(Integer.MAX_VALUE, inputSize))];
 		
-		final InputStream fis = Files.newInputStream(in, StandardOpenOption.READ);
-		//This will be closed when we close the produced InputStream
-		@SuppressWarnings("resource")
-		final CipherInputStream cis = new CipherInputStream(fis, encryptor);
-		
-		return new SequenceInputStream(ivsStream, cis);
+		final Path out = Files.createTempFile(null, null);
+		try(final InputStream is = Files.newInputStream(in, StandardOpenOption.READ);
+			final OutputStream os = Files.newOutputStream(out, StandardOpenOption.WRITE);){
+			
+			while(true) {
+				int read = is.read(buf);
+				if(read == -1) {
+					return out;
+				} else {
+					byte[] ivs = getRandomBytes(IVS_LENGTH);
+					Cipher c = encryptionCipherForSecret(ivs);
+					os.write(ivs);
+					final byte[] toWrite = c.doFinal(buf, 0, read);
+					os.write(toWrite);
+				}
+			}
+		} catch(BadPaddingException | IllegalBlockSizeException ex) {
+			throw new IOException(ex);
+		}
 	}
 	
+	public void decryptFile(Path in, Path out) throws IOException {
+		final long inputSize = Files.size(in);
+		final byte[] ivs = new byte[IVS_LENGTH];
+		
+		try(final InputStream is = Files.newInputStream(in, StandardOpenOption.READ);
+			final OutputStream os = Files.newOutputStream(out, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE)){
+			
+			while(true) {
+				is.read(ivs);
+				Cipher c = decryptionCipherForSecret(ivs);
+				//This needs to be huge for performance reasons
+				//Java AEAD decryption is completely non performant for update() calls thru Java 10,
+				//due to not accelerating w/ hardware, and buffering the output 
+				final byte[] buf = new byte[Math.min(RESET_DEC_CIPHER_EVERY, (int)Math.min(Integer.MAX_VALUE, inputSize))];
+				int read = is.read(buf);
+				if(read == -1) {
+					return;
+				} else {
+					final byte[] toWrite = c.doFinal(buf, 0, read);
+					os.write(toWrite);
+				}
+			}
+		} catch(IllegalBlockSizeException | BadPaddingException ex ) {
+			throw new RuntimeException(ex);
+		}
+	}
+		
 	public byte[] encrypt(byte[] in) {
 		final byte[] ivs = getRandomBytes(IVS_LENGTH);
 		final Cipher cipher = encryptionCipherForSecret(ivs);
 		
 		try(final ByteArrayOutputStream baos = new ByteArrayOutputStream()){
 			baos.write(ivs);
-			try(final CipherOutputStream cos = new CipherOutputStream(baos, cipher)){
-				cos.write(in);
-			}
+			baos.write(cipher.doFinal(in));
 			return baos.toByteArray();
-		} catch(IOException ex) {
+		} catch(IOException  | BadPaddingException | IllegalBlockSizeException ex) {
 			throw new RuntimeException(ex);
 		}
 	}
@@ -208,29 +238,9 @@ public class KeyfileCrypter {
 		try (final ByteArrayInputStream bais = new ByteArrayInputStream(in)) {
 			bais.read(ivs);
 			final Cipher cipher = decryptionCipherForSecret(ivs);
-			try(final CipherInputStream is = new CipherInputStream(bais, cipher)){
-				return is.readAllBytes();
-			}
-		} catch(IOException ex) {
+			return cipher.doFinal(bais.readAllBytes());
+		} catch(IOException | BadPaddingException | IllegalBlockSizeException ex) {
 			throw new RuntimeException(ex);
 		}
-	}
-	
-	public void decrypt(InputStream is, OutputStream os) throws IOException {
-		final byte[] ivs = new byte[IVS_LENGTH];
-		is.read(ivs);
-
-		final Cipher cipher = decryptionCipherForSecret(ivs);
-		final byte[] buf = new byte[8192];
-		int nRead;
-		while((nRead = is.read(buf)) >= 0) {
-			os.write(cipher.update(buf, 0, nRead));
-		}
-		try {
-			os.write(cipher.doFinal());
-		} catch(BadPaddingException | IllegalBlockSizeException ex) {
-			throw new RuntimeException(ex);
-		}
-		os.flush();
 	}
 }

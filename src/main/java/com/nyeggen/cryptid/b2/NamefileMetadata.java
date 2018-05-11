@@ -33,6 +33,8 @@ public class NamefileMetadata implements B2Deletable {
 	@Override
 	public String getRemoteName() { return remoteName; }
 	public String getAssociatedIntrinsicFile() { return associatedIntrinsicFile; }
+	public String getLocalName() { return localName; }
+	public long getTimestamp() { return timestamp; }
 	
 	public static boolean isNamefileMDName(B2FileVersion b2fv) {
 		return b2fv.getFileName().startsWith(NAMEFILE_PREFIX);

@@ -66,8 +66,18 @@ public class Restore implements AutoCloseable {
 		client.close();
 	}
 
-	private B2ContentSink decryptionSink(OutputStream os) {
-		return (B2Headers responseHeaders, InputStream in) -> { crypt.decrypt(in, os); };
+	private B2ContentSink decryptionSink(Path out) {
+		return (B2Headers responseHeaders, InputStream in) -> {
+			Path tempEncrypted = Files.createTempFile(null, null);
+			Path tempDecrypted = Files.createTempFile(null, null);
+			try(final OutputStream os = Files.newOutputStream(tempEncrypted, StandardOpenOption.WRITE)){
+				in.transferTo(os);
+			}
+			crypt.decryptFile(tempEncrypted, tempDecrypted);
+			Files.move(tempDecrypted, out);
+			
+			Files.delete(tempEncrypted);
+		};
 	}
 	
 	//All remote records are correlated; if they pass the filter (eg a regex match on the name,
@@ -118,9 +128,7 @@ public class Restore implements AutoCloseable {
 					i++;
 					final Path restoreTo = locator.apply(rr);
 					System.out.println("Resotring " + rr.getIntrinsicMDRemoteName() + " to " + restoreTo.toString());
-					try(final OutputStream os = Files.newOutputStream(restoreTo, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)){
-						client.downloadById(rr.getIntrinsicMD().getRemoteID(), decryptionSink(os));
-					}
+					client.downloadById(rr.getIntrinsicMD().getRemoteID(), decryptionSink(restoreTo));
 				}
 			}
 		}
@@ -129,9 +137,8 @@ public class Restore implements AutoCloseable {
 	
 	public void restoreRemoteFile(String remoteName, String localOut) throws IOException, B2Exception {
 		System.out.println("Restoring " + remoteName);
-		try (final OutputStream os = Files.newOutputStream(Paths.get(localOut), StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)){
-			client.downloadByName(bucketName, remoteName, decryptionSink(os));
-		}
+		final Path out = Paths.get(localOut);
+		client.downloadByName(bucketName, remoteName, decryptionSink(out));
 		System.out.println("Restored " + remoteName + " to " + localOut);
 	}
 }

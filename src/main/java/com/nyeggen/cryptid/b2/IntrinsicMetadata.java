@@ -9,7 +9,6 @@ import java.util.Map;
 import java.util.UUID;
 
 import com.backblaze.b2.client.structures.B2DeleteFileVersionRequest;
-import com.backblaze.b2.client.structures.B2DownloadByNameRequest;
 import com.backblaze.b2.client.structures.B2FileVersion;
 import com.nyeggen.cryptid.util.Hasher;
 import com.nyeggen.cryptid.util.KeyfileCrypter;
@@ -97,10 +96,4 @@ public class IntrinsicMetadata implements B2Deletable {
 		
 		return out;
 	}
-	
-	public B2DownloadByNameRequest downloadForBody(String bucket) {
-		return B2DownloadByNameRequest.builder(bucket, remoteName)
-				.build();
-	}
-
 }

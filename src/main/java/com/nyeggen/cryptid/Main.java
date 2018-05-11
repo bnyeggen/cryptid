@@ -14,7 +14,7 @@ public class Main {
 		boolean deleteOrphans = false;
 		int nThreads = -1;
 		char[] newPassphrase = null;
-		boolean skipRenames = false;
+		Boolean skipRenames = null;
 
 		//Manually incrementing
 		for(int i=0; i<args.length; ) {
@@ -97,7 +97,7 @@ public class Main {
 		if(applicationID == null) applicationID = Config.getInstance().getApplicationKey();
 		if(accountID == null) accountID = Config.getInstance().getAccountID();
 		if(nThreads == -1) nThreads = Config.getInstance().getDefaultParallelism();
-		//TODO: Load skipRenames from config if not in CLI args		
+		if(skipRenames == null) skipRenames = Config.getInstance().getDefaultSkipRenames();
 		
 		System.out.println("Initiating sync");
 		try (final Sync sync = new Sync(

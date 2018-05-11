@@ -8,7 +8,6 @@ import java.nio.file.FileVisitor;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.BasicFileAttributes;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashMap;
@@ -150,7 +149,9 @@ public class Sync implements AutoCloseable {
 	            if (!Files.exists(file)) return FileVisitResult.CONTINUE;
 	            if (Files.isDirectory(file)) return FileVisitResult.CONTINUE;
 	        	final LocalRecord lr = new LocalRecord(file);
-	        	totalCounter.getAndIncrement();
+	        	if(totalCounter.incrementAndGet() % 1000 == 0) {
+	        		System.out.println(totalCounter.get() + " files scanned");
+	        	}
 	        	
 				final boolean existingNameMatch;
 				final boolean identityMatch;
@@ -243,19 +244,30 @@ public class Sync implements AutoCloseable {
 			final B2DeleteFileVersionRequest del = i.toDelete();
 			client.deleteFileVersion(del);
 		}
-
-		//Also delete orphaned large files
-		for(final B2FileVersion b2fv : client.unfinishedLargeFiles(bucketId)) {
-			System.out.println("Deleting partial " + b2fv.getFileName());
-			client.deleteFileVersion(b2fv);
+	}
+	
+	//Checks the list for duplicate metadata, replacing older with newer in case
+	//of conflict
+	private static void checkAndAddNamefile(Map<String, NamefileMetadata> nfmd, NamefileMetadata md) {
+		final String mdLocalName = md.getLocalName();
+		final NamefileMetadata existing = nfmd.get(mdLocalName);
+		if(existing == null) {
+			//No name match, insert and return
+			nfmd.put(mdLocalName, md);
+		} else {
+			//Name collision; retain more recent
+			if(md.getTimestamp() > existing.getTimestamp()) {
+				nfmd.put(mdLocalName, md);
+			}
 		}
 	}
 	
 	//Calling this twice will result in nothing good.
 	public void run(boolean deleteOrphans) throws B2Exception, IOException {				
-		//Scan remote files
+		//From remote name (guaranteed unique) to MD record
 		final Map<String, IntrinsicMetadata> imd = new HashMap<>();
-		final Collection<NamefileMetadata> nfmd = new ArrayList<>();
+		//From local name (not guaranteed unique upstream) to MD record
+		final Map<String, NamefileMetadata> nfmd = new HashMap<>();
 		try {
 			System.out.println("Scanning remote files");
 			int i = 0;
@@ -266,16 +278,16 @@ public class Sync implements AutoCloseable {
 				//to the delete lists.  Things will be removed from delete lists as they
 				//are correlated with local files, leaving only orphans to be deleted
 				try {
-					//Decrypting these is actually pretty expensive comparatively
 					if (b2fv.getFileName().equals(KEYFILE_NAME)) {
 						//Do nothing.  This is your keyfile, pulled earlier.
 					} else if(IntrinsicMetadata.isIntrinsicMDName(b2fv)) {
-						IntrinsicMetadata md = IntrinsicMetadata.fromB2FileVersion(b2fv, crypt);
+						final IntrinsicMetadata md = IntrinsicMetadata.fromB2FileVersion(b2fv, crypt);
 						imd.put(md.getRemoteName(), md);
 						if(deleteOrphans) toDelete.put(md.getRemoteName(), md);
 					} else if(NamefileMetadata.isNamefileMDName(b2fv)) {
-						NamefileMetadata md = NamefileMetadata.fromB2FileVersion(b2fv, crypt);
-						nfmd.add(md);
+						final NamefileMetadata md = NamefileMetadata.fromB2FileVersion(b2fv, crypt);
+						//Check for duplicate local names
+						checkAndAddNamefile(nfmd, md);
 						if(deleteOrphans) toDelete.put(md.getRemoteName(), md);
 					} else {
 						//The checks above are already complementary, so currently this
@@ -299,45 +311,44 @@ public class Sync implements AutoCloseable {
 		
 		//Correlate remote intrinsic & namefile to gen complete remote records
 		int i = 0;
-		for(final NamefileMetadata namefile : nfmd) {
-			//If we have multiple namefiles, they're all treated as valid
+		//Note that this only works if we have namefiles for a particular intrinsic,
+		//otherwise it'll be deleted.
+		for(final NamefileMetadata namefile : nfmd.values()) {
+			//If we have multiple namefiles, they're all treated as valid, if we have for
+			//instance local dupes
 			final IntrinsicMetadata intrinsic = imd.get(namefile.getAssociatedIntrinsicFile());
 			if(intrinsic != null) {
 				final RemoteRecord rr = new RemoteRecord(intrinsic, namefile);
 				remoteFiles.put(rr.getLocalName() ,rr);
 				i++;
 			} else {
-				//We have namefile without associated intrinsic, somehow. Delete the namefile.
-				if(deleteOrphans) toDelete.put(namefile.getRemoteName(), namefile);
+				//We have namefile without associated intrinsic, somehow. Namefile will be deleted
+				//based on having added it to the delete list above and not producing a RemoteRecord
+				//to remove it from the delete list
 			}
 		}
 		System.out.println(i + " remote records correlated");
 		
-		//Walk local structure in separate thread
-		final Thread localScanner = new Thread(()-> {
-			try {
-				Files.walkFileTree(baseDir, getLocalScanner());
-				//Signal we are done
-				uploads.add(UploadPair.QUEUE_POISON);
-				System.out.println(totalCounter.get() + " total local files found");	
-				//File scanner handles local / remote correlation, so we can actually delete here
-				if(deleteOrphans) {
-					System.out.println("Deleting leftover files on remote");
-					//Delete leftovers
-					try {
-						deleteLeftovers();
-						System.out.println("Delete finished");
-					} catch(B2Exception ex) {
-						throw new RuntimeException("Delete failed", ex);
-					}
+		//Walk local structure, could do in separate thread
+		{
+			Files.walkFileTree(baseDir, getLocalScanner());
+			//Signal we are done
+			uploads.add(UploadPair.QUEUE_POISON);
+			System.out.println(totalCounter.get() + " total local files found");	
+			//File scanner handles local / remote correlation, so we can actually delete here
+			if(deleteOrphans) {
+				System.out.println("Deleting leftover files on remote");
+				//Delete leftovers
+				try {
+					deleteLeftovers();
+					System.out.println("Delete finished");
+				} catch(B2Exception ex) {
+					throw new RuntimeException("Delete failed", ex);
 				}
 			}
-			catch(IOException ex) { throw new RuntimeException(ex); }
-		});
-		localScanner.start();
+		}
 		
 		//Upload
-		//The perf impact of this is encrypting the streams in parallel w/ upload
 		System.out.println("Uploading files");
 		final AtomicInteger uploadCounter = new AtomicInteger(0);
 		final Thread[] uploaders = new Thread[uploadParallelism];
@@ -346,14 +357,13 @@ public class Sync implements AutoCloseable {
 				while(true) try {
 					final UploadPair upload = uploads.take();
 					if(upload == UploadPair.QUEUE_POISON) {
-						localScanner.join();
 						//Add back to the queue so other threads can die
 						uploads.put(upload);
 						break;
 					}
+					System.out.println("Uploading for local file: " + upload.getLocalName());
 					final B2UploadFileRequest namefile = upload.getNamefileUpload(crypt, bucketId);
 					final B2UploadFileRequest body = upload.getBodyUpload(crypt, bucketId);
-					System.out.println("Uploading for local file: " + upload.getLocalName());
 					if(namefile != null && body == null && skipRenames) {
 						System.out.println("Skipping rename, " + uploads.size() + " remaining, " + totalCounter.get() + " files scanned");
 						continue;						
@@ -369,6 +379,7 @@ public class Sync implements AutoCloseable {
 						} else {
 							client.uploadSmallFile(body);
 						}
+						upload.deleteTempCryptFile();
 					}
 					System.out.println(uploadCounter.incrementAndGet() + " pairs uploaded, " + uploads.size() + " remaining, " + totalCounter.get() + " files scanned");
 				} catch (IOException | B2Exception | InterruptedException ex) {
@@ -381,5 +392,11 @@ public class Sync implements AutoCloseable {
 			try {t.join();}
 			catch(InterruptedException ex) { throw new RuntimeException(ex); }
 		}
+		//Also delete orphaned large files, but only at end, to allow upload continuation
+		if(deleteOrphans) for(final B2FileVersion b2fv : client.unfinishedLargeFiles(bucketId)) {
+			System.out.println("Deleting partial " + b2fv.getFileName());
+			client.deleteFileVersion(b2fv);
+		}
+
 	}
 }

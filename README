@@ -20,6 +20,7 @@ later on.
 
 TODO:
 - Clean up config.properties defaulting
+- Manifest file to avoid having to scan everything in remote
 
 MAYBEs:
 - Block based storage option
